@@ -1,0 +1,56 @@
+(load "Test.carp")
+(use Test)
+(load "diagnostics.carp")
+(use Diagnostics)
+
+(deftest diagnostics-test
+  (let [state (Test.State.init 0 0)
+        diag (Diagnostics.new @"test_run.log")]
+    (do
+      ;; 1. Test Log Levels to String
+      (set! state (assert-equal &state "DEBUG" (LogLevel.to-string (LogLevel.Debug)) "LogLevel.Debug string"))
+      (set! state (assert-equal &state "INFO" (LogLevel.to-string (LogLevel.Info)) "LogLevel.Info string"))
+      (set! state (assert-equal &state "WARNING" (LogLevel.to-string (LogLevel.Warning)) "LogLevel.Warning string"))
+      (set! state (assert-equal &state "ERROR" (LogLevel.to-string (LogLevel.Error)) "LogLevel.Error string"))
+      (set! state (assert-equal &state "CRITICAL" (LogLevel.to-string (LogLevel.Critical)) "LogLevel.Critical string"))
+
+      ;; 2. Test Error System
+      (set! state (assert-false &state @(Diagnostics.has-error &diag) "Initial has-error is false"))
+      
+      (Diagnostics.report-error! &diag 500 "Internal server error")
+      (set! state (assert-true &state @(Diagnostics.has-error &diag) "has-error is true after report"))
+      (set! state (assert-equal &state 500 @(Diagnostics.last-error-code &diag) "last-error-code is 500"))
+      (set! state (assert-equal &state "Internal server error" (Diagnostics.last-error-msg &diag) "last-error-msg is correct"))
+      
+      (Diagnostics.clear-error! &diag)
+      (set! state (assert-false &state @(Diagnostics.has-error &diag) "has-error is false after clear"))
+      (set! state (assert-equal &state 0 @(Diagnostics.last-error-code &diag) "last-error-code is 0 after clear"))
+
+      ;; 3. Test Profiling Timer Zones
+      (Diagnostics.start-zone! &diag "Update Loop")
+      (System.sleep-micros 1000)
+      (Diagnostics.end-zone! &diag "Update Loop")
+      
+      (let [stats-arr (Diagnostics.zone-stats-arr &diag)
+            len (Array.length stats-arr)]
+        (do
+          (set! state (assert-equal &state 1 len "One zone stats entry created"))
+          (when (= len 1)
+            (let [stats (Array.unsafe-nth stats-arr 0)]
+              (do
+                (set! state (assert-equal &state "Update Loop" (ZoneStats.name stats) "ZoneStats name is correct"))
+                (set! state (assert-equal &state 1 @(ZoneStats.count stats) "ZoneStats count is 1"))
+                (set! state (assert-true &state (Uint64.> @(ZoneStats.sum-ns stats) (Uint64.from-long 0l)) "ZoneStats duration is non-zero")))))))
+
+      ;; 4. Test Macro with-zone
+      (Diagnostics.with-zone &diag "Macro Zone"
+        (System.sleep-micros 500))
+      
+      (let [stats-arr (Diagnostics.zone-stats-arr &diag)
+            len (Array.length stats-arr)]
+        (set! state (assert-equal &state 2 len "Second zone stats entry created via macro")))
+
+      ;; Clean up test log file
+      (ignore (System.system "rm -f test_run.log"))
+      
+      state)))

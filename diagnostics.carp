@@ -1,0 +1,216 @@
+;; diagnostics.carp
+;; A high-performance, robust, and extensible diagnostics, logging, and error tracking library.
+
+(use Double)
+(use Uint64)
+
+;; Log Severity Levels
+(deftype LogLevel
+  Debug
+  Info
+  Warning
+  Error
+  Critical
+)
+
+(defmodule LogLevel
+  (defn to-string [level]
+    (match level
+      (LogLevel.Debug) "DEBUG"
+      (LogLevel.Info) "INFO"
+      (LogLevel.Warning) "WARNING"
+      (LogLevel.Error) "ERROR"
+      (LogLevel.Critical) "CRITICAL"))
+)
+
+;; A stats tracker for a specific performance zone
+(deftype ZoneStats [
+  name String
+  count Int
+  sum-ns Uint64
+  min-ns Uint64
+  max-ns Uint64
+  last-ns Uint64
+  sum-ms Double
+  sum-sq-ms Double
+  spikes-count Int
+])
+
+
+;; An active profiling timer
+(deftype ActiveTimer [
+  name String
+  start-ns Uint64
+])
+
+;; Diagnostics state holding active profiling timers and logged errors
+(deftype Diagnostics [
+  log-file-path String
+  has-error Bool
+  last-error-code Int
+  last-error-msg String
+  active-timers (Array ActiveTimer)
+  zone-stats-arr (Array ZoneStats)
+])
+
+(defmodule Diagnostics
+  (defn new [log-path]
+    (let [act-timers (the (Array ActiveTimer) [])
+          stats-arr (the (Array ZoneStats) [])]
+      (Diagnostics.init log-path false 0 @"" act-timers stats-arr)))
+
+  ;; Write string to the diagnostics log file (opens/closes safely to append)
+  (defn write-log-file! [diag msg]
+    (let [path (Diagnostics.log-file-path diag)]
+      (if (not (String.empty? path))
+          (let [file (IO.Raw.fopen path "a")]
+            (if (null? file)
+                (IO.println &(str* "[DIAGNOSTICS ERROR] Failed to open log file: " path))
+                (do
+                  (IO.Raw.fwrite! msg 1 (String.length msg) file)
+                  (IO.Raw.fclose! file))))
+          ())))
+
+  ;; General logging function
+  (defn log! [diag level msg]
+    (let [timestamp (System.nanotime)
+          level-str (LogLevel.to-string level)
+          formatted-msg (str* "[" (Uint64.str timestamp) "] [" level-str "] " @msg "\n")]
+      (do
+        (IO.print &formatted-msg)
+        (Diagnostics.write-log-file! diag &formatted-msg))))
+
+  ;; Error system
+  (defn report-error! [diag code msg]
+    (do
+      (Diagnostics.set-has-error! diag true)
+      (Diagnostics.set-last-error-code! diag code)
+      (Diagnostics.set-last-error-msg! diag @msg)
+      (Diagnostics.log! diag (LogLevel.Error) &(str* "ERROR CODE [" (Int.str code) "]: " @msg))))
+
+  (defn clear-error! [diag]
+    (do
+      (Diagnostics.set-has-error! diag false)
+      (Diagnostics.set-last-error-code! diag 0)
+      (Diagnostics.set-last-error-msg! diag @""))))
+
+(defmodule Diagnostics
+  ;; Find the index of a stats tracker by name
+  (defn find-zone-stats-index [diag name-ref]
+    (let [arr (Diagnostics.zone-stats-arr diag)
+          len (Array.length arr)
+          found-idx -1]
+      (do
+        (for [i 0 len]
+          (when (= (ZoneStats.name (Array.unsafe-nth arr i)) name-ref)
+            (set! found-idx i)))
+        found-idx)))
+
+  (defmacro with-zone [diag zone-name :rest body]
+    (list 'do
+          (list 'Diagnostics.start-zone! diag zone-name)
+          (cons 'do body)
+          (list 'Diagnostics.end-zone! diag zone-name)))
+
+  ;; Start a performance measurement zone
+  (defn start-zone! [diag name]
+    (let [t (ActiveTimer.init @name (System.nanotime))]
+      (Array.push-back! (Diagnostics.active-timers diag) t)))
+
+  ;; End a performance measurement zone and update its stats
+  (defn end-zone! [diag name-ref]
+    (let [end-time (System.nanotime)
+          timers (Diagnostics.active-timers diag)
+          len (Array.length timers)
+          found-idx -1]
+      (do
+        ;; Search backwards for the most recent matching timer
+        (let [i (dec len)]
+          (while (and (>= i 0) (= found-idx -1))
+            (do
+              (when (= (ActiveTimer.name (Array.unsafe-nth timers i)) name-ref)
+                (set! found-idx i))
+              (set! i (dec i)))))
+        (if (= found-idx -1)
+            (Diagnostics.log! diag (LogLevel.Warning) &(str* "Tried to end non-existent profiling zone: " @name-ref))
+            (let [timer @(Array.unsafe-nth timers found-idx)
+                  start-time @(ActiveTimer.start-ns &timer)
+                  duration-ns (Uint64.- end-time start-time)
+                  stats-idx (Diagnostics.find-zone-stats-index diag name-ref)]
+              (do
+                (Diagnostics.set-active-timers! diag (remove-nth found-idx @timers))
+                (let [dur-ms (/ (Double.from-long (Uint64.to-long duration-ns)) 1000000.0)
+                      is-spike (if (> dur-ms 16.67) 1 0)]
+                  (if (= stats-idx -1)
+                      ;; Create new stats entry
+                      (let [new-stats (ZoneStats.init @name-ref 1 duration-ns duration-ns duration-ns duration-ns dur-ms (* dur-ms dur-ms) is-spike)]
+                        (Array.push-back! (Diagnostics.zone-stats-arr diag) new-stats))
+                      ;; Update existing entry
+                      (let [stats (Array.unsafe-nth (Diagnostics.zone-stats-arr diag) stats-idx)
+                            cnt @(ZoneStats.count stats)
+                            total-ns @(ZoneStats.sum-ns stats)
+                            min-val @(ZoneStats.min-ns stats)
+                            max-val @(ZoneStats.max-ns stats)
+                            total-ms @(ZoneStats.sum-ms stats)
+                            total-sq-ms @(ZoneStats.sum-sq-ms stats)
+                            spikes @(ZoneStats.spikes-count stats)]
+                        (do
+                          (ZoneStats.set-count! stats (inc cnt))
+                          (ZoneStats.set-sum-ns! stats (Uint64.+ total-ns duration-ns))
+                          (ZoneStats.set-last-ns! stats duration-ns)
+                          (ZoneStats.set-sum-ms! stats (+ total-ms dur-ms))
+                          (ZoneStats.set-sum-sq-ms! stats (+ total-sq-ms (* dur-ms dur-ms)))
+                          (ZoneStats.set-spikes-count! stats (+ spikes is-spike))
+                          (when (Uint64.< duration-ns min-val)
+                            (ZoneStats.set-min-ns! stats duration-ns))
+                          (when (Uint64.> duration-ns max-val)
+                            (ZoneStats.set-max-ns! stats duration-ns))))))))))))
+
+  ;; Helper to format durations to milliseconds
+  (defn ns->ms-str [ns]
+    (let [ms (/ (Double.from-long (Uint64.to-long ns)) 1000000.0)]
+      (Double.str ms)))
+
+  ;; Print all gathered performance stats
+  (defn print-stats! [diag]
+    (let [arr (Diagnostics.zone-stats-arr diag)
+          len (Array.length arr)
+          header "--- PERFORMANCE PROFILE REPORT ---\n"
+          total-frame-ms 0.0]
+      (do
+        (for [i 0 len]
+          (let [stats (Array.unsafe-nth arr i)]
+            (when (= (ZoneStats.name stats) "Total Frame Time")
+              (set! total-frame-ms @(ZoneStats.sum-ms stats)))))
+        (Diagnostics.log! diag (LogLevel.Info) header)
+        (for [i 0 len]
+          (let [stats (Array.unsafe-nth arr i)
+                name-str @(ZoneStats.name stats)
+                cnt @(ZoneStats.count stats)
+                total-ns @(ZoneStats.sum-ns stats)
+                min-ns @(ZoneStats.min-ns stats)
+                max-ns @(ZoneStats.max-ns stats)
+                last-ns @(ZoneStats.last-ns stats)
+                avg-ns (Uint64./ total-ns (Uint64.from-long (Long.from-int cnt)))
+                total-ms @(ZoneStats.sum-ms stats)
+                total-sq-ms @(ZoneStats.sum-sq-ms stats)
+                mean-ms (/ total-ms (Double.from-int cnt))
+                var-ms (- (/ total-sq-ms (Double.from-int cnt)) (* mean-ms mean-ms))
+                clamped-var (if (< var-ms 0.0) 0.0 var-ms)
+                stddev-ms (Double.sqrt clamped-var)
+                pct (if (> total-frame-ms 0.0)
+                        (* (/ total-ms total-frame-ms) 100.0)
+                        0.0)
+                spikes-cnt @(ZoneStats.spikes-count stats)
+                msg (str* "Zone: " name-str
+                           " | Runs: " (Int.str cnt)
+                           " | Last: " (Diagnostics.ns->ms-str last-ns) "ms"
+                           " | Avg: " (Diagnostics.ns->ms-str avg-ns) "ms"
+                           " | Jitter: " (Double.str stddev-ms) "ms"
+                           " | Min: " (Diagnostics.ns->ms-str min-ns) "ms"
+                           " | Max: " (Diagnostics.ns->ms-str max-ns) "ms"
+                           " | Spikes (>16.6ms): " (Int.str spikes-cnt)
+                           " | % of Frame: " (Double.str pct) "%")]
+            (Diagnostics.log! diag (LogLevel.Info) &msg)))
+        (Diagnostics.log! diag (LogLevel.Info) "----------------------------------\n"))))
+)
