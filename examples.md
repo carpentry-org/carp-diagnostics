@@ -5,7 +5,7 @@
 Logging messages, timing execution zones, printing stats reports, and tracking errors:
 
 ```clojure
-(load "carp-diagnostics/diagnostics.carp")
+(load "git@github.com:carpentry-org/carp-diagnostics@master")
 (use Diagnostics)
 
 (defn main []
