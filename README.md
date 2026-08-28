@@ -13,9 +13,17 @@ This library provides structured logging (to console and/or file) and hierarchic
   - Spikes tracking (specifically flags runs taking longer than 16.67ms, which would drop frames under a 60 FPS target).
   - Relative frame time percentages.
 
+## Installation
+
+```
+(load "git@github.com:carpentry-org/carp-diagnostics@master")
+```
+
 ## Examples
 
-See [examples.md](examples.md) for usage examples.
+See [examples.md](examples.md) for usage examples, and the
+[API documentation](https://carpentry.dev/carp-diagnostics) for the full
+reference.
 
 ## License
 MIT
