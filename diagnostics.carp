@@ -5,9 +5,11 @@
 (use Uint64)
 
 ;; Log Severity Levels
+(doc LogLevel "severity of a log line, from `Debug` to `Critical`.")
 (deftype LogLevel Debug Info Warning Error Critical)
 
 (defmodule LogLevel
+  (doc to-string "returns the level’s name, as it appears in the log.")
   (defn to-string [level]
     (match level
       (LogLevel.Debug) "DEBUG"
@@ -17,6 +19,11 @@
       (LogLevel.Critical) "CRITICAL")))
 
 ;; A stats tracker for a specific performance zone
+(doc ZoneStats "accumulated timings for one profiling zone.
+
+Keeps a running sum and sum of squares so average and standard deviation come
+out without retaining every sample. `spikes-count` is how often the zone ran
+over its frame budget.")
 (deftype ZoneStats
   [name String
    count Int
@@ -29,10 +36,14 @@
    spikes-count Int])
 
 ;; An active profiling timer
+(doc ActiveTimer "an open profiling zone: its name and the nanotime it
+started at.")
 (deftype ActiveTimer [name String
                       start-ns Uint64])
 
 ;; Diagnostics state holding active profiling timers and logged errors
+(doc Diagnostics "holds the log destination, the last reported error, the
+open profiling timers, and the accumulated per-zone stats.")
 (deftype Diagnostics
   [log-file-path String
    has-error Bool
@@ -42,12 +53,20 @@
    zone-stats-arr (Array ZoneStats)])
 
 (defmodule Diagnostics
+  (doc new "creates a diagnostics context writing to `log-path`.
+
+Pass the empty string to log to stdout only.")
   (defn new [log-path]
     (let [act-timers (the (Array ActiveTimer) [])
           stats-arr (the (Array ZoneStats) [])]
       (Diagnostics.init log-path false 0 @"" act-timers stats-arr)))
 
   ;; Write string to the diagnostics log file (opens/closes safely to append)
+  (doc write-log-file! "appends `msg` to the log file.
+
+Opens and closes the file per call, so an interrupted program still leaves a
+complete log behind. Does nothing when the path is empty. A file that cannot
+be opened is reported on stdout rather than raised.")
   (defn write-log-file! [diag msg]
     (let [path (Diagnostics.log-file-path diag)]
       (if (not (String.empty? path))
@@ -61,6 +80,8 @@
         ())))
 
   ;; General logging function
+  (doc log! "logs `msg` at `level`, to stdout and, when a log path was given,
+to the file.")
   (defn log! [diag level msg]
     (let [timestamp (System.nanotime)
           level-str (LogLevel.to-string level)
@@ -77,6 +98,10 @@
         (Diagnostics.write-log-file! diag &formatted-msg))))
 
   ;; Error system
+  (doc report-error! "records `code` and `msg` as the last error and logs it
+at `Critical`.
+
+Overwrites any previous error; this is a last-error slot, not a queue.")
   (defn report-error! [diag code msg]
     (do
       (Diagnostics.set-has-error! diag true)
@@ -86,6 +111,7 @@
                         (LogLevel.Error)
                         &(str* "ERROR CODE [" (Int.str code) "]: " @msg))))
 
+  (doc clear-error! "clears the stored error state.")
   (defn clear-error! [diag]
     (do
       (Diagnostics.set-has-error! diag false)
@@ -94,6 +120,8 @@
 
 (defmodule Diagnostics
   ;; Find the index of a stats tracker by name
+  (doc find-zone-stats-index "returns the index of the stats tracker named
+`name-ref`, or `-1` when there is none.")
   (defn find-zone-stats-index [diag name-ref]
     (let [arr (Diagnostics.zone-stats-arr diag)
           len (Array.length arr)
@@ -104,6 +132,11 @@
             (set! found-idx i)))
         found-idx)))
 
+  (doc with-zone "runs `body` inside a profiling zone called `zone-name`.
+
+The usual way to profile, since it cannot leak an open timer the way a
+mismatched [`start-zone!`](#start-zone!) and [`end-zone!`](#end-zone!) pair
+can.")
   (defmacro with-zone [diag zone-name :rest body]
     (list 'do
           (list 'Diagnostics.start-zone! diag zone-name)
@@ -111,11 +144,21 @@
           (list 'Diagnostics.end-zone! diag zone-name)))
 
   ;; Start a performance measurement zone
+  (doc start-zone! "opens a profiling zone called `name`.
+
+Zones nest, and the same name may be open more than once; each
+[`end-zone!`](#end-zone!) closes the most recent one.")
   (defn start-zone! [diag name]
     (let [t (ActiveTimer.init @name (System.nanotime))]
       (Array.push-back! (Diagnostics.active-timers diag) t)))
 
   ;; End a performance measurement zone and update its stats
+  (doc end-zone! "closes the most recent open zone named `name-ref` and folds
+its duration into that zone’s stats.
+
+Searches the active timers backwards, so nested zones of the same name close
+innermost first. Logs a warning and does nothing if no timer with that name is
+open.")
   (defn end-zone! [diag name-ref]
     (let [end-time (System.nanotime)
           timers (Diagnostics.active-timers diag)
@@ -184,11 +227,18 @@
                         (ZoneStats.set-max-ns! stats duration-ns))))))))))))
 
   ;; Helper to format durations to milliseconds
+  (doc ns->ms-str "formats a nanosecond count as a millisecond string.")
   (defn ns->ms-str [ns]
     (let [ms (/ (Double.from-long (Uint64.to-long ns)) 1000000.0)]
       (Double.str ms)))
 
   ;; Print all gathered performance stats
+  (doc print-stats! "logs a profile report over every zone recorded so far.
+
+Each row carries call count, average, min, max, standard deviation and spike
+count. If a zone named `\"Total Frame Time\"` exists, the other zones are also
+reported as a percentage of it, which is the number that tells you where a
+frame actually went.")
   (defn print-stats! [diag]
     (let [arr (Diagnostics.zone-stats-arr diag)
           len (Array.length arr)
